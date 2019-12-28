@@ -84,7 +84,7 @@ let rec fold_expression_stack_once<'T> (expr_s: Expression<'T> list, prio:int) :
         | a::b::rexpr_s when (() |> a.contains_null |> not) && (() |> b.contains_null |> not) && prio = 1-> Cons(a,b)::rexpr_s
         | head::tail -> head::(fold_expression_stack_once (tail, prio))
         | [] -> []
-//O(n*m) Worst Case O(n* logn)
+//O(n*m) Worst Case O(n^2)
 let rec fold_expression_stack<'T> (expr_s: Expression<'T> list) : Expression<'T> list = 
     let fold = (expr_s, 2) |> fold_expression_stack_once
     if List.length fold < List.length expr_s then
@@ -100,6 +100,9 @@ let rec fold_expression_stack<'T> (expr_s: Expression<'T> list) : Expression<'T>
             else
                 expr_s
 
+let remove_symbol(s:String, sym:Char):String = 
+    String.collect (fun(x) -> if x <> sym then x.ToString() else "") s
+
 type Regex<'T when 'T :> IComparable<String>> = 
     { expression: Expression<'T>; alphabet : 'T list}
 
@@ -109,8 +112,8 @@ type Regex<'T when 'T :> IComparable<String>> =
     //Von dem Alphabet wird an dieser Stelle die Eindeutigkeit erwartet ----> Ein Alphabet ["hallo"; "ha"] wäre invalide, da "hallo" mit "ha" anfängt
     //Dafür gibt es auch ein Fachbegriff, der ist mir aber entfallen.
     //Warum wird dies erwartet? Der String wird Character für Character nach validen Literalen des Alphabets durchgegangen, diese werden falls benötigt zusammengebaut
-    //Falls Keywords "*,+,?,(,),·" in Literalen verwendet werden, müssen diese im tatsächlichen Regex und im Alphabet mit "\" escaped werden.
-    //O(n* logn), wenn ich mich nicht täusche
+    //Falls Keywords "*,+,?,(,),·" in Literalen verwendet werden, müssen diese im Regex und im Alphabet mit "\" escaped werden.
+    //O(n^2) im Worst Case, wenn ich mich nicht täusche
     static member parse<'T when 'T :> IComparable<String>> (input:String, alphabet: 'T list) : Result<Regex<'T>, String> =
         let rec remove_trailing_brackets (s:String) : String =
             if s.StartsWith(")") then s.[1..]|>remove_trailing_brackets else s
@@ -118,19 +121,21 @@ type Regex<'T when 'T :> IComparable<String>> =
             if cursor.StartsWith("(") then
                 let res = inner (cursor.[1..], [], 3)
                 match res with
-                    | Ok v -> inner (snd v, ((fst v).expression)::expr_s, 0)
+                    | Ok v -> (if (fst v).expression.contains_null() then (snd v, expr_s,0) else (snd v, ((fst v).expression)::expr_s, 0)) |> inner 
                     | _ -> res
             else
                 let (token, rest) = scan_forward (cursor, alphabet)
-                printf "Cursor: %s ; Expr Stack: %A; Token: %A, Rest: %s\n\n" cursor expr_s token rest //DEBUG
+                //printf "Cursor: %s ; Expr Stack: %A; Token: %A, Rest: %s\n\n" cursor expr_s token rest //DEBUG
                 let expr_s = if token.IsSome then token.Value::expr_s else expr_s
                 if token.IsNone || rest.StartsWith(")") then
                     if rest.Length = 0 || rest.StartsWith(")") then
                         let expr_s = expr_s |> List.rev |> fold_expression_stack
                         let rest = rest |> remove_trailing_brackets
-                        printfn "EXPR_S: %A" expr_s
+                        //printfn "EXPR_S: %A" expr_s
+                        if token.IsNone && ((((cursor, '(') |> remove_symbol), ')') |> remove_symbol).Length > 0 then Error "Invalid token" else
                         match expr_s with
                             | [single] -> Ok(({expression=single;alphabet=alphabet},rest))
+                            | [] -> Ok(({expression=Epsilon;alphabet=alphabet},rest))
                             | _ -> Error ("Couldn't finish parsing")
                     else
                         Error ("String couldn't be tokenized. No valid token!")
@@ -157,10 +162,40 @@ type Regex<'T when 'T :> IComparable<String>> =
             | Ok (r,rest_str) -> if rest_str.Length = 0 then Ok(r) else Error "Invalid expression"
             | Error e -> Error(e)
 
+
+
+//---------------------------------------------------------------------------------------------------
+//Tests und IO
 let parse_print<'T when 'T :> IComparable<String>> (s : String, alphabet: 'T list) =
     match Regex.parse (s, alphabet) with
         | Ok reg -> sprintf "%s" (reg.expression.to_string(0))
         | Error msg -> sprintf "%s" msg
+        
+let regex_parse_tests() : unit =
+    printfn "\n---------------------------------------------\n"
+    let alphabet = ["a";"b";"c"]
+    //Generel correctness
+    let strings = ["a";"b";"a*";"b*";"ab";"ab*";"a*b";"(a?b?)+";"aaaaaa?(aaaaa)?aaaaa+(aaaa)+c*a+";"(a|b)*(a|b)*(a|b)";"b(a|b)*a";"(b(cb|aa*)c)*";"(a|b)*b(a|b)(b|a)";"((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*";"((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*"]
+    for s in strings do
+        let res = ((parse_print (s, alphabet)),'·') |> remove_symbol
+        if s.Length < 120 then
+            printfn "\"%s\" : %s" s res
+        assert(s = res)
+    //Simplification Abilities
+    let strings = [("(a)(b)", "ab");("((((a))))()()(b)()", "ab");("(((())))(a(b))((()))(a)(b)","abab");("(a|b)","a|b");("(a|b*)","a|b*")]
+    for s in strings do
+        let res = ((parse_print (fst s, alphabet)),'·') |> remove_symbol
+        printfn "\"%s\" : %s" (fst s) res
+        assert(res = snd s)
+    //Escape symbols
+    let alphabet = ["\(";"\)";"\Ø";"\*";"\|";"\+";"\?";"\·"]
+    let strings = ["\(";"\)";"\Ø";"\*";"\|";"\+";"\?";"\||\|";"\**";"\++"]
+    for s in strings do
+        let res = ((parse_print (s, alphabet)),'·') |> remove_symbol
+        printfn "\"%s\" : %s" s res
+        assert(s = res)
+    printfn "\n---------------------------------------------\n"
+    ()
 [<EntryPoint>]
 let main argv =
     //Regex to String testing
@@ -168,7 +203,7 @@ let main argv =
     printfn "%s" (example.to_string ())
 
     //String to Regex testing
-    printfn "\"(a|b)*b(a|b)?\"->Regex->String: %s" (parse_print("\((a|b)*\)\((b(a|b)?\(\))", ["a";"b";"\(";"\)"]))
-
+    printfn "\"(a|b)*b(a|b)?\"->Regex->String: %s" (parse_print("(a|b)*b(a|b)?", ["a";"b";]))
+    regex_parse_tests()
     //Regex to acceptor testing
     0

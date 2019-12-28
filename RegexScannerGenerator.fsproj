@@ -4,9 +4,8 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>netcoreapp3.0</TargetFramework>
   </PropertyGroup>
-
+  
   <ItemGroup>
     <Compile Include="ScannerGenerator.fs" />
   </ItemGroup>
-
 </Project>
