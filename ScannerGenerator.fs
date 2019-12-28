@@ -112,6 +112,8 @@ type Regex<'T when 'T :> IComparable<String>> =
     //Falls Keywords "*,+,?,(,),·" in Literalen verwendet werden, müssen diese im tatsächlichen Regex und im Alphabet mit "\" escaped werden.
     //O(n* logn), wenn ich mich nicht täusche
     static member parse<'T when 'T :> IComparable<String>> (input:String, alphabet: 'T list) : Result<Regex<'T>, String> =
+        let rec remove_trailing_brackets (s:String) : String =
+            if s.StartsWith(")") then s.[1..]|>remove_trailing_brackets else s
         let rec inner (cursor:String, expr_s: Expression<'T> list, prio:int): Result<(Regex<'T>*String), String> =
             if cursor.StartsWith("(") then
                 let res = inner (cursor.[1..], [], 3)
@@ -125,6 +127,7 @@ type Regex<'T when 'T :> IComparable<String>> =
                 if token.IsNone || rest.StartsWith(")") then
                     if rest.Length = 0 || rest.StartsWith(")") then
                         let expr_s = expr_s |> List.rev |> fold_expression_stack
+                        let rest = rest |> remove_trailing_brackets
                         printfn "EXPR_S: %A" expr_s
                         match expr_s with
                             | [single] -> Ok(({expression=single;alphabet=alphabet},rest))
