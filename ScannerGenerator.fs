@@ -117,11 +117,11 @@ type Regex<'T when 'T :> IComparable<String>> =
     static member parse<'T when 'T :> IComparable<String>> (input:String, alphabet: 'T list) : Result<Regex<'T>, String> =
         let rec remove_trailing_brackets (s:String) : String =
             if s.StartsWith(")") then s.[1..]|>remove_trailing_brackets else s
-        let rec inner (cursor:String, expr_s: Expression<'T> list, prio:int): Result<(Regex<'T>*String), String> =
+        let rec inner (cursor:String, expr_s: Expression<'T> list): Result<(Regex<'T>*String), String> =
             if cursor.StartsWith("(") then
-                let res = inner (cursor.[1..], [], 3)
+                let res = inner (cursor.[1..], [])
                 match res with
-                    | Ok v -> (if (fst v).expression.contains_null() then (snd v, expr_s,0) else (snd v, ((fst v).expression)::expr_s, 0)) |> inner 
+                    | Ok v -> (if (fst v).expression.contains_null() then (snd v, expr_s) else (snd v, ((fst v).expression)::expr_s)) |> inner 
                     | _ -> res
             else
                 let (token, rest) = scan_forward (cursor, alphabet)
@@ -140,7 +140,7 @@ type Regex<'T when 'T :> IComparable<String>> =
                     else
                         Error ("String couldn't be tokenized. No valid token!")
                 else
-                    inner (rest, expr_s, 0)
+                    inner (rest, expr_s)
         let check_brackets(brackets: String) : bool =
             //printfn "%s" brackets //DEBUG
             let rec inner (s : String) : String =
@@ -157,7 +157,7 @@ type Regex<'T when 'T :> IComparable<String>> =
              if remove.StartsWith("\(") || remove.StartsWith("\)") then remove.[2..] |> remove_escape_brackets else
              remove.[0..0] + (remove.[1..] |> remove_escape_brackets)
         if not ((String.collect (fun(x)-> if x = '(' || x= ')' then x.ToString() else "") (input|>remove_escape_brackets)) |> check_brackets) then Error "Invalid brackets!" else
-        let res = inner (input,[], 0)
+        let res = inner (input,[])
         match res with
             | Ok (r,rest_str) -> if rest_str.Length = 0 then Ok(r) else Error "Invalid expression"
             | Error e -> Error(e)
