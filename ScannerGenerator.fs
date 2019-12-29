@@ -3,7 +3,7 @@
 module ScannerGenerator
 open System
 
-type Expression<'T> =
+type Expression<'T when 'T: equality> =
     |Epsilon // €
     |Empty // o/
     |Literal of 'T
@@ -13,7 +13,31 @@ type Expression<'T> =
     |Plus of Expression<'T> // positive Kleenesche Hülle (+)
     |QMark of Expression<'T> // ? Optional
     // Präzedenz: Literal=Empty=Epsilon > ? = + = * > · > |
+    member this.interpret_expression<'T when 'T: equality>(input: 'T list): bool =
+        match input with
+            | [] -> this.nullable()
+            | head::tail -> this.divide(head).interpret_expression(tail)
 
+    member this.divide<'T when 'T : equality>(l: 'T) : Expression<'T> = 
+        match this with
+            |Epsilon|Empty -> Empty
+            |Literal other -> if other = l then Epsilon else Empty
+            |Cons (e1, e2) -> if e1.nullable() then Alternative(Cons(e1.divide(l),e2),e2.divide(l)) else Cons(e1.divide(l), e2)
+            |Alternative (e1, e2) -> Alternative(e1.divide(l), e2.divide(l))
+            |Star e1 -> Cons(e1.divide(l), Star e1)
+            |Plus e1 -> Cons(e1.divide(l), Star e1)
+            |QMark e1 -> e1.divide(l)
+
+    member this.nullable(): bool = 
+        match this with
+            | Epsilon -> true
+            | Empty -> false
+            | Literal _ -> false
+            | Cons (e1, e2) -> e1.nullable() && e2.nullable()
+            | Alternative (e1, e2) -> e1.nullable() || e2.nullable()
+            | Star _ -> true
+            | Plus e -> e.nullable()
+            | QMark _ -> true
     //Helper method for parsing - detmerines if an expression is fully parsed already
     member this.contains_null () : bool =
         match this with
@@ -42,7 +66,7 @@ let rec alphabet_contains<'T when 'T :> IComparable<String>> (alphabet: 'T list,
 
 //Tokenizer
 //O(n)
-let rec scan_forward<'T when 'T :> IComparable<String>> (cursor:String, alphabet: 'T list) : Expression<'T> option * String =
+let rec scan_forward<'T when 'T :> IComparable<String> and 'T:equality> (cursor:String, alphabet: 'T list) : Expression<'T> option * String =
     let rec tokenize(string_left: String, current_string:String) =
         if string_left.Length = 0 then
             (None, "")
@@ -74,7 +98,7 @@ let rec scan_forward<'T when 'T :> IComparable<String>> (cursor:String, alphabet
 
 //completes finished subtrees (only 1 at a time). Takes care of precedence via double iteration
 //O(n)
-let rec fold_expression_stack_once<'T> (expr_s: Expression<'T> list, prio:int) : Expression<'T> list =
+let rec fold_expression_stack_once<'T when 'T : equality> (expr_s: Expression<'T> list, prio:int) : Expression<'T> list =
     match expr_s with 
         | smth::Cons (Empty, Empty)::smth2::rexpr_s when prio = 1 -> Cons(smth, smth2)::rexpr_s
         | smth::Alternative(Empty, Empty)::smth2::rexpr_s when prio = 0 -> Alternative(smth, smth2)::rexpr_s
@@ -85,7 +109,7 @@ let rec fold_expression_stack_once<'T> (expr_s: Expression<'T> list, prio:int) :
         | head::tail -> head::(fold_expression_stack_once (tail, prio))
         | [] -> []
 //O(n*m) Worst Case O(n^2)
-let rec fold_expression_stack<'T> (expr_s: Expression<'T> list) : Expression<'T> list = 
+let rec fold_expression_stack<'T when 'T: equality> (expr_s: Expression<'T> list) : Expression<'T> list = 
     let fold = (expr_s, 2) |> fold_expression_stack_once
     if List.length fold < List.length expr_s then
         fold |> fold_expression_stack
@@ -103,7 +127,7 @@ let rec fold_expression_stack<'T> (expr_s: Expression<'T> list) : Expression<'T>
 let remove_symbol(s:String, sym:Char):String = 
     String.collect (fun(x) -> if x <> sym then x.ToString() else "") s
 
-type Regex<'T when 'T :> IComparable<String>> = 
+type Regex<'T when 'T :> IComparable<String> and 'T:equality> = 
     { expression: Expression<'T>; alphabet : 'T list}
 
     member this.to_string (): String =
@@ -166,7 +190,31 @@ type Regex<'T when 'T :> IComparable<String>> =
 
 //---------------------------------------------------------------------------------------------------
 //Tests und IO
-let parse_print<'T when 'T :> IComparable<String>> (s : String, alphabet: 'T list) =
+let infer_alphabet(input:String): String list = 
+    let rec inner(rest:String, curr_alph: String list):String list= 
+        if rest.Length = 0 then curr_alph else
+        if List.contains rest.[0..0] curr_alph then inner(rest.[1..],curr_alph) else inner(rest.[1..], rest.[0..0]::curr_alph)
+    inner(input, [])
+let rec tokenize<'T when 'T:> IComparable<String> and 'T:equality>(input: String, alphabet: 'T list): 'T list =
+    if input.Length = 0 then [] else 
+    let (expr, rest) = scan_forward(input, alphabet)
+    match expr with
+        |Some (Literal l) -> l::(tokenize(rest, alphabet))
+        | _ -> failwith "Illegal input string!"
+let escape_symbols = ["(";")";"Ø";"*";"|";"+";"?";"·"]
+
+let interpreter(regex:String, input:String) :bool= 
+    //First infer alphabet
+    let input = String.collect (fun(x) -> if List.contains (x.ToString()) escape_symbols then "\\"+x.ToString() else x.ToString()) input
+    printfn "Interpreting Regex: %s with input: %s" regex input
+    let alphabet = infer_alphabet input
+    printfn "Infered alphabet: %A" alphabet
+    let regex = Regex.parse (regex, alphabet)
+    let regex = match regex with |Ok reg -> reg | Error msg -> failwith "Couldn't parse regex"
+    printfn "Parsed Regex:\n %s" (regex.to_string())
+    regex.expression.interpret_expression(tokenize (input, alphabet))
+
+let parse_print<'T when 'T :> IComparable<String> and 'T: equality> (s : String, alphabet: 'T list) =
     match Regex.parse (s, alphabet) with
         | Ok reg -> sprintf "%s" (reg.expression.to_string(0))
         | Error msg -> sprintf "%s" msg
@@ -174,7 +222,7 @@ let parse_print<'T when 'T :> IComparable<String>> (s : String, alphabet: 'T lis
 let regex_parse_tests() : unit =
     printfn "\n---------------------------------------------\n"
     let alphabet = ["a";"b";"c"]
-    //Generel correctness
+    //General correctness
     let strings = ["a";"b";"a*";"b*";"ab";"ab*";"a*b";"(a?b?)+";"aaaaaa?(aaaaa)?aaaaa+(aaaa)+c*a+";"(a|b)*(a|b)*(a|b)";"b(a|b)*a";"(b(cb|aa*)c)*";"(a|b)*b(a|b)(b|a)";"((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*";"((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*"]
     for s in strings do
         let res = ((parse_print (s, alphabet)),'·') |> remove_symbol
@@ -196,6 +244,13 @@ let regex_parse_tests() : unit =
         assert(s = res)
     printfn "\n---------------------------------------------\n"
     ()
+
+let interpreter_tests() : unit =
+    //Gerade noch rechtzeitig, um die Übungsaufgaben zu lösen :)
+    printfn "%A" (interpreter ("b(a|b)*a", "bbaba"))
+    printfn "%A" (interpreter ("(b(cb|aa*)c)*","bcbcbabc"))
+    printfn "%A" (interpreter ("(a|b)*b(a|b)(b|a)","ababbbaba"))
+    printfn "%A" (interpreter ("((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*","aabaabaabaabaabaabaabaabaabaab"))
 [<EntryPoint>]
 let main argv =
     //Regex to String testing
@@ -206,4 +261,5 @@ let main argv =
     printfn "\"(a|b)*b(a|b)?\"->Regex->String: %s" (parse_print("(a|b)*b(a|b)?", ["a";"b";]))
     regex_parse_tests()
     //Regex to acceptor testing
+    interpreter_tests()
     0
