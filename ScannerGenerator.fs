@@ -2,6 +2,124 @@
 //Angelehnt an : Grundlagen der Programmierung, Ralf Hinze TU KL WS 19/20, https://pl.cs.uni-kl.de/homepage/de/teaching/ws19/gdp/
 module ScannerGenerator
 open System
+type DFA = 
+    |Empty
+    |Regular of bool*DFA array
+
+    static member single(final:bool, i:int) : DFA =
+        Regular (final, [|for _ in 1..i -> Empty|])
+
+    member this.is_semi_empty(): bool =
+        match this with 
+            |Empty -> failwith "Can't be called on an Empty"
+            |Regular (_, arr) ->
+                let arr = arr.[1..]
+                not (Array.exists (fun(x)-> match x with |Empty->false|_->true) arr)
+
+    member this.set(index:int, d:DFA) : unit =
+        match this with
+            |Empty -> failwith "Can't be called on an Empty"
+            |Regular (_, edges) ->
+                Array.set edges index d
+
+    //O(n)
+    member this.interpreter_expression<'T when 'T: equality>(input: 'T list, alphabet: 'T list) :bool=
+        match this with
+            |Empty -> false
+            |Regular (end_state, tf) ->
+                match input with
+                    | [] -> end_state || tf.[0].interpreter_expression([],alphabet)
+                    | head::tail -> 
+                        let index = 1+ (List.findIndex (fun(x)-> x=head) alphabet) //0.te Kante ist für Epsilon
+                        tf.[index].interpreter_expression(tail,alphabet) || this.is_semi_empty() && tf.[0].interpreter_expression(head::tail,alphabet) //Die beiden optionen sind ausschließend. Laufzeit bleibt linear
+
+type NFA = 
+    |Empty
+    |Regular of bool*(NFA list)array
+
+    member this.equals(other: NFA) :bool=
+        (sprintf "%A" this) = (sprintf "%A" other) //Ummmmm....Don't quote me on this
+        //It is actually pretty difficult to detect whether two graphs (possibly containing cycles) are identical.
+
+    static member single(final:bool,i:int) :NFA =
+        Regular(final, [|for _ in 1..i-> []|])
+
+    member this.is_final() : bool =
+        match this with |Empty -> failwith "Dont call this on an Empty" |Regular (a, _) -> a
+
+    member this.append(index:int, n:NFA) : unit=
+        match this with
+            |Empty -> failwith "Can't be called on an Empty"
+            |Regular (_,edges) -> 
+                let before = Array.get edges index;
+                Array.set edges index (n::before)
+                ()
+
+    //Possibly O(2^n)? :OOOO
+    member this.convert_to_dfa<'T when 'T: equality>(alphabet: 'T list) : DFA =
+        let len = 1+ List.length alphabet
+        let contains(a:NFA list, b:NFA) :bool =
+            List.exists (fun(x:NFA)-> x.equals(b)) a
+        let rec make_set (set: NFA list): NFA list =
+            match set with
+                | [] -> []
+                | head::tail -> if contains(tail, head) then tail else head::make_set tail
+        let equal_sets(a: NFA list, b: NFA list) :bool=
+            if List.length a <> List.length b then false else
+            not (List.exists (fun(x) -> not (contains(b,x))) a)
+        let find_in_q(q: (bool*DFA*NFA list) list, to_find: NFA list) : Option<int> =
+            List.tryFindIndex (fun(x) -> 
+                let (_,_, other) =x
+                equal_sets(other, to_find)
+                ) q
+        let rec inner(q: (bool*DFA*NFA list) list) : (bool*DFA*NFA list) list=
+            //printfn "In Inner. Q: %A" q //DEBUG
+            let not_visited_states = List.filter (fun(x) -> 
+                                                        let (a,_,_)=x;
+                                                        not a) q
+            //printfn "Not visited states: %A" not_visited_states                                                     
+            if List.isEmpty not_visited_states then q else
+            let rec modifiy_q(states: (bool*DFA*NFA list) list, q: (bool*DFA*NFA list) list) : (bool*DFA*NFA list) list =
+                match states with
+                    | [] -> q
+                    | head::tail ->
+                        let (_,df, nf) = head
+                        assert(match df with |DFA.Empty->false|_->true)
+                        //Step 1. Remove ourselves from q
+                        let q = List.filter (fun(x)->
+                            let (_,_,other)=x
+                            not (equal_sets(other, nf))) q
+                        //Step 2. Add ourselves back in with visited set to "true".
+                        let q = (true,df,nf)::q
+                        //Step 3. Get all edges from our nf that don't point to an empty list
+                        //Step 4. For each of those: If [nf] list is not in queue add to queue with Df.single. Set reference of our df to that single
+                        //If [nf] list is in queue, set reference of our DF to their DF
+                        let rec iterate_states(curr:int, q: (bool*DFA*NFA list) list) :(bool*DFA*NFA list) list =
+                            if curr = len then q else
+                            let outgoing_edges = List.collect (fun(x) -> 
+                                match x with
+                                    |Empty -> failwith "Expecting non Empty NFA here"
+                                    |Regular (_, edges) -> edges.[curr]) nf
+                            let outgoing_edges = List.filter (fun(x) -> match x with |Empty->false|_->true) outgoing_edges //Remove empties
+                            let outgoing_edges = make_set outgoing_edges //Remove duplicates
+                            if List.isEmpty outgoing_edges then iterate_states(curr+1,q)else
+                            let index = find_in_q(q, outgoing_edges)
+                            match index with
+                                |Some(index)->
+                                    let (_,dfa,_) = q.[index]
+                                    df.set(curr, dfa)
+                                    iterate_states(curr+1,q)
+                                |None ->
+                                    let new_df = DFA.single(List.exists (fun(x:NFA) -> x.is_final()) outgoing_edges, len)
+                                    df.set(curr, new_df)
+                                    iterate_states(curr+1,(false,new_df,outgoing_edges)::q)
+                        let q = iterate_states(0,q)
+                        modifiy_q (tail, q)
+            let q = modifiy_q(not_visited_states,q)
+            inner q
+        let initial_dfa_state = DFA.single(this.is_final(), len)
+        let q = inner ([(false, initial_dfa_state,[this])])
+        initial_dfa_state
 
 type Expression<'T when 'T: equality> =
     |Epsilon // €
@@ -13,11 +131,60 @@ type Expression<'T when 'T: equality> =
     |Plus of Expression<'T> // positive Kleenesche Hülle (+)
     |QMark of Expression<'T> // ? Optional
     // Präzedenz: Literal=Empty=Epsilon > ? = + = * > · > |
+
+    //O(n) Step 1 of ByteCode Interpreter -> Regex->NFA (fast)
+    member this.convert_to_nfa<'T when 'T:equality>(alphabet: 'T list, final_flag:bool) : NFA * NFA =
+        let len = 1+List.length alphabet
+        match this with
+            |Epsilon|Empty -> failwith "No valid Regex should contain those Leafs"
+            |Literal l -> 
+                let curr_state = NFA.single(false, len)
+                let index = 1+List.findIndex (fun(x)-> x=l) alphabet;
+                let final = NFA.single(final_flag, len)
+                curr_state.append(index, final)
+                (curr_state,final)
+            |Cons (e1, e2) ->
+                let (n1,n1end) = e1.convert_to_nfa(alphabet,false)
+                let (n2,n2end) = e2.convert_to_nfa(alphabet,final_flag)
+                n1end.append(0,n2)
+                (n1, n2end)
+            | Alternative (e1, e2) ->
+                let (n1, n1end) = e1.convert_to_nfa(alphabet, false)
+                let (n2, n2end) = e2.convert_to_nfa(alphabet, false)
+                let curr = NFA.single(false, len)
+                let ende = NFA.single(final_flag, len)
+                curr.append(0, n1)
+                curr.append(0, n2)
+                n1end.append(0, ende)
+                n2end.append(0, ende)
+                (curr, ende)
+            | Star e1 ->
+                let (n1, n1end) = e1.convert_to_nfa(alphabet, false)
+                n1end.append(0, n1)
+                let curr = NFA.single(false, len)
+                let ende = NFA.single(final_flag, len)
+                curr.append(0, n1)
+                curr.append(0, ende)
+                n1end.append(0, ende)
+                (curr, ende)
+            | Plus e1 ->
+                Cons(e1, Star e1).convert_to_nfa(alphabet, final_flag)
+            | QMark e1 ->
+                let (n1, n1end) = e1.convert_to_nfa(alphabet, false)
+                let curr = NFA.single(false, len)
+                curr.append(0, n1)
+                let ende = NFA.single(final_flag, len)
+                curr.append(0, ende)
+                n1end.append(0, ende)
+                (curr, ende)
+
+    //Pure interpreter of regex
     member this.interpret_expression<'T when 'T: equality>(input: 'T list): bool =
         match input with
             | [] -> this.nullable()
             | head::tail -> this.divide(head).interpret_expression(tail)
 
+    //Helper for interpreter of regex
     member this.divide<'T when 'T : equality>(l: 'T) : Expression<'T> = 
         match this with
             |Epsilon|Empty -> Empty
@@ -28,6 +195,7 @@ type Expression<'T when 'T: equality> =
             |Plus e1 -> Cons(e1.divide(l), Star e1)
             |QMark e1 -> e1.divide(l)
 
+    //Helper for interpreter of regex
     member this.nullable(): bool = 
         match this with
             | Epsilon -> true
@@ -38,6 +206,7 @@ type Expression<'T when 'T: equality> =
             | Star _ -> true
             | Plus e -> e.nullable()
             | QMark _ -> true
+    
     //Helper method for parsing - detmerines if an expression is fully parsed already
     member this.contains_null () : bool =
         match this with
@@ -48,6 +217,7 @@ type Expression<'T when 'T: equality> =
             | Alternative (a, b) -> a.contains_null() || b.contains_null()
             | Star a | Plus a | QMark a -> a.contains_null()
 
+    //Pretty print of self
     member this.to_string (priority:int) : String =
         match this with
             | Epsilon -> "ε"
@@ -64,7 +234,7 @@ let rec alphabet_contains<'T when 'T :> IComparable<String>> (alphabet: 'T list,
         | [] -> None
         | head::tail -> if head.CompareTo(value) = 0 then Some(head) else alphabet_contains(tail, value)
 
-//Tokenizer
+//Tokenizer of possibly invalid strings
 //O(n)
 let rec scan_forward<'T when 'T :> IComparable<String> and 'T:equality> (cursor:String, alphabet: 'T list) : Expression<'T> option * String =
     let rec tokenize(string_left: String, current_string:String) =
@@ -124,14 +294,29 @@ let rec fold_expression_stack<'T when 'T: equality> (expr_s: Expression<'T> list
             else
                 expr_s
 
+//Helper method for removing single chars out of a string
 let remove_symbol(s:String, sym:Char):String = 
     String.collect (fun(x) -> if x <> sym then x.ToString() else "") s
+
+//Takes a valid sequence of Literals as a String and converts them to a 'T list
+let rec tokenize<'T when 'T:> IComparable<String> and 'T:equality>(input: String, alphabet: 'T list): 'T list =
+    if input.Length = 0 then [] else 
+    let (expr, rest) = scan_forward(input, alphabet)
+    match expr with
+        |Some (Literal l) -> l::(tokenize(rest, alphabet))
+        | _ -> failwith "Illegal input string!"
 
 type Regex<'T when 'T :> IComparable<String> and 'T:equality> = 
     { expression: Expression<'T>; alphabet : 'T list}
 
     member this.to_string (): String =
         (sprintf "<Regex with \nAlphabet : %A\nExpression : %s\n>" this.alphabet ((0) |> this.expression.to_string))
+
+
+    member this.generate_acceptor() : String->bool =
+        fun(x) ->
+            let tokens = tokenize(x, this.alphabet)
+            (fst (this.expression.convert_to_nfa(this.alphabet, true))).convert_to_dfa(this.alphabet).interpreter_expression(tokens, this.alphabet)
     //Infix Parsing - Etwas komplizierter
     //Von dem Alphabet wird an dieser Stelle die Eindeutigkeit erwartet ----> Ein Alphabet ["hallo"; "ha"] wäre invalide, da "hallo" mit "ha" anfängt
     //Dafür gibt es auch ein Fachbegriff, der ist mir aber entfallen.
@@ -195,12 +380,6 @@ let infer_alphabet(input:String): String list =
         if rest.Length = 0 then curr_alph else
         if List.contains rest.[0..0] curr_alph then inner(rest.[1..],curr_alph) else inner(rest.[1..], rest.[0..0]::curr_alph)
     inner(input, [])
-let rec tokenize<'T when 'T:> IComparable<String> and 'T:equality>(input: String, alphabet: 'T list): 'T list =
-    if input.Length = 0 then [] else 
-    let (expr, rest) = scan_forward(input, alphabet)
-    match expr with
-        |Some (Literal l) -> l::(tokenize(rest, alphabet))
-        | _ -> failwith "Illegal input string!"
 let escape_symbols = ["(";")";"Ø";"*";"|";"+";"?";"·"]
 
 let interpreter(regex:String, input:String) :bool= 
@@ -208,11 +387,21 @@ let interpreter(regex:String, input:String) :bool=
     let input = String.collect (fun(x) -> if List.contains (x.ToString()) escape_symbols then "\\"+x.ToString() else x.ToString()) input
     printfn "Interpreting Regex: %s with input: %s" regex input
     let alphabet = infer_alphabet input
-    printfn "Infered alphabet: %A" alphabet
+    printfn "Inferred alphabet: %A" alphabet
     let regex = Regex.parse (regex, alphabet)
     let regex = match regex with |Ok reg -> reg | Error msg -> failwith "Couldn't parse regex"
     printfn "Parsed Regex:\n %s" (regex.to_string())
     regex.expression.interpret_expression(tokenize (input, alphabet))
+
+let bytecode_interpreter(regex:String, input:String) : bool =
+    let input = String.collect (fun(x) -> if List.contains (x.ToString()) escape_symbols then "\\"+x.ToString() else x.ToString()) input
+    printfn "Interpreting Regex: %s with input: %s" regex input
+    let alphabet = infer_alphabet input
+    printfn "Inferred alphabet: %A" alphabet
+    let regex = Regex.parse (regex, alphabet)
+    let regex = match regex with |Ok reg -> reg | Error msg -> failwith "Couldn't parse regex"
+    printfn "Parsed Regex:\n %s" (regex.to_string())
+    regex.generate_acceptor() input
 
 let parse_print<'T when 'T :> IComparable<String> and 'T: equality> (s : String, alphabet: 'T list) =
     match Regex.parse (s, alphabet) with
@@ -247,10 +436,18 @@ let regex_parse_tests() : unit =
 
 let interpreter_tests() : unit =
     //Gerade noch rechtzeitig, um die Übungsaufgaben zu lösen :)
-    printfn "%A" (interpreter ("b(a|b)*a", "bbaba"))
-    printfn "%A" (interpreter ("(b(cb|aa*)c)*","bcbcbabc"))
-    printfn "%A" (interpreter ("(a|b)*b(a|b)(b|a)","ababbbaba"))
-    printfn "%A" (interpreter ("((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*","aabaabaabaabaabaabaabaabaabaab"))
+    printfn "Is in language: %A" (interpreter ("b(a|b)*a", "bbaba"))
+    printfn "Is in language: %A" (interpreter ("(b(cb|aa*)c)*","bcbcbabc"))
+    printfn "Is in language: %A" (interpreter ("(a|b)*b(a|b)(b|a)","ababbbaba"))
+    //printfn "Is in language: %A" (interpreter ("((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*","aabaabaabaabaabaabaabaabaabaab"))
+
+let bytecodeinterpreter_tests() : unit =
+    printfn "\n---------------------------------------------\n"
+    printfn "Is in language: %A" (bytecode_interpreter ("b(a|b)*a", "bbaba"))
+    printfn "Is in language: %A" (bytecode_interpreter ("(b(cb|aa*)c)*","bcbcbabc"))
+    printfn "Is in language: %A" (bytecode_interpreter ("(a|b)*b(a|b)(b|a)","ababbbaba"))
+    printfn "Is in language: %A" (bytecode_interpreter ("(a|b)?abb*","ab"))
+    //printfn "Is in language: %A" (bytecode_interpreter ("((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*","aabaabaabaabaabaabaabaabaabaab"))
 [<EntryPoint>]
 let main argv =
     //Regex to String testing
@@ -262,4 +459,5 @@ let main argv =
     regex_parse_tests()
     //Regex to acceptor testing
     interpreter_tests()
+    bytecodeinterpreter_tests()
     0
