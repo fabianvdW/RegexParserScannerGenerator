@@ -2,19 +2,45 @@
 //Angelehnt an : Grundlagen der Programmierung, Ralf Hinze TU KL WS 19/20, https://pl.cs.uni-kl.de/homepage/de/teaching/ws19/gdp/
 module ScannerGenerator
 open System
+
+//General functions
+let same = LanguagePrimitives.PhysicalEquality
+let same_x x = fun(y)->same x y
+let unwrap option = match option with | Some(x)->x | _ -> failwith "Can't unwrap a None type"
+
+//Set functions. Goes by reference equality
+let rec contains set functor =
+    List.exists (fun(x) -> functor (x)) set
+let set_equals set1 set2 =
+    if List.length set1 <> List.length set2 then false else
+    not (List.exists (fun(x) -> not (contains set2 (same_x x))) set1)
+let rec make_set non_set = 
+    match non_set with
+        | [] -> []
+        | head::tail -> if contains tail (same_x head) then make_set tail else head::(make_set tail)
+let rec set_union set1 set2 =
+    match set1 with
+        | [] -> set2
+        | head::tail ->
+            if contains set2 (same_x head) then set_union tail set2 else head::(set_union tail set2)
+//Cache type for a bit of speed
+type Cache<'T,'U> = (('T  * 'U) list)
+let rec probe_cache_f (cache:Cache<'T,'U>) (functor:'T->bool)  :'U option =
+    match cache with
+        | [] -> None
+        | head::tail -> if functor (fst head) then Some(snd head) else probe_cache_f tail functor
+let rec probe_cache (cache:Cache<'T,'U>) (some:'T) : 'U option= 
+    probe_cache_f cache (same_x some)
+
+
+
+//-----------------------------------------
 type DFA = 
     |Empty
     |Regular of bool*DFA array
 
     static member single(final:bool, i:int) : DFA =
         Regular (final, [|for _ in 1..i -> Empty|])
-
-    member this.is_semi_empty(): bool =
-        match this with 
-            |Empty -> failwith "Can't be called on an Empty"
-            |Regular (_, arr) ->
-                let arr = arr.[1..]
-                not (Array.exists (fun(x)-> match x with |Empty->false|_->true) arr)
 
     member this.set(index:int, d:DFA) : unit =
         match this with
@@ -28,18 +54,36 @@ type DFA =
             |Empty -> false
             |Regular (end_state, tf) ->
                 match input with
-                    | [] -> end_state || tf.[0].interpreter_expression([],alphabet)
+                    | [] -> end_state
                     | head::tail -> 
-                        let index = 1+ (List.findIndex (fun(x)-> x=head) alphabet) //0.te Kante ist für Epsilon
-                        tf.[index].interpreter_expression(tail,alphabet) || this.is_semi_empty() && tf.[0].interpreter_expression(head::tail,alphabet) //Die beiden optionen sind ausschließend. Laufzeit bleibt linear
+                        let index = (List.findIndex (fun(x)-> x=head) alphabet) 
+                        tf.[index].interpreter_expression(tail,alphabet) 
+        
 
 type NFA = 
     |Empty
     |Regular of bool*(NFA list)array
 
-    member this.equals(other: NFA) :bool=
-        (sprintf "%A" this) = (sprintf "%A" other) //Ummmmm....Don't quote me on this
-        //It is actually pretty difficult to detect whether two graphs (possibly containing cycles) are identical.
+    //Return all the states, which are reachable through doing nothing (Epsilon-reachable)
+    member this.epsilon_reachable(cache:Cache<NFA, NFA list>, marker:Cache<NFA,unit>) =
+        let mark = probe_cache marker this
+        if mark.IsSome then ([],cache,marker) else
+        let probe = probe_cache cache this
+        if probe.IsSome then (unwrap probe,cache,marker) else
+        let marker = (this,())::marker
+        let arr = match this with |Regular (_,arr)->arr |_-> failwith "Not expecting this here!"
+        let my_closure = [this]@arr.[0]
+        let rec call_recursivly(cache, marker, set:NFA list) =
+            match set with
+                | [] -> (cache, marker, [])
+                | head::tail ->
+                    let (eps, cache,marker) = head.epsilon_reachable(cache,marker)
+                    let (cache,marker, app) = call_recursivly(cache,marker,tail)
+                    (cache, marker, eps@app)
+        let (cache,marker,app) = call_recursivly(cache,marker,arr.[0])
+        let res = make_set (my_closure@app)
+        let cache = (this,res)::cache
+        (res,cache,marker)
 
     static member single(final:bool,i:int) :NFA =
         Regular(final, [|for _ in 1..i-> []|])
@@ -55,72 +99,61 @@ type NFA =
                 Array.set edges index (n::before)
                 ()
 
-    //Possibly O(2^n)? :OOOO
+    //Possibly O(2^n)? Still pretty fast thanks to chaching and Referecne equality check.
     member this.convert_to_dfa<'T when 'T: equality>(alphabet: 'T list) : DFA =
-        let len = 1+ List.length alphabet
-        let contains(a:NFA list, b:NFA) :bool =
-            List.exists (fun(x:NFA)-> x.equals(b)) a
-        let rec make_set (set: NFA list): NFA list =
-            match set with
-                | [] -> []
-                | head::tail -> if contains(tail, head) then tail else head::make_set tail
-        let equal_sets(a: NFA list, b: NFA list) :bool=
-            if List.length a <> List.length b then false else
-            not (List.exists (fun(x) -> not (contains(b,x))) a)
-        let find_in_q(q: (bool*DFA*NFA list) list, to_find: NFA list) : Option<int> =
-            List.tryFindIndex (fun(x) -> 
-                let (_,_, other) =x
-                equal_sets(other, to_find)
-                ) q
-        let rec inner(q: (bool*DFA*NFA list) list) : (bool*DFA*NFA list) list=
-            //printfn "In Inner. Q: %A" q //DEBUG
-            let not_visited_states = List.filter (fun(x) -> 
-                                                        let (a,_,_)=x;
-                                                        not a) q
-            //printfn "Not visited states: %A" not_visited_states                                                     
-            if List.isEmpty not_visited_states then q else
-            let rec modifiy_q(states: (bool*DFA*NFA list) list, q: (bool*DFA*NFA list) list) : (bool*DFA*NFA list) list =
-                match states with
-                    | [] -> q
+        let is_final(state: NFA list) = contains state (fun(x) -> x.is_final())
+        let find_functor = fun(x) -> 
+            let (_,(_,visited)) = x 
+            not visited
+        let probe_transition_table(tt, set:NFA list) =
+            probe_cache_f tt (fun(x) -> set_equals x set)
+        let len = List.length alphabet
+        let e_cache:Cache<NFA,NFA list> = [] //epsilon cache
+        let transition_table:Cache<NFA list, (DFA*bool)> = [] //transition table of our DFA
+        let (q_0, e_cache, _) = this.epsilon_reachable(e_cache, [])
+        let d_0 = DFA.single(is_final q_0,len)
+        let transition_table = (q_0, (d_0,false))::transition_table
+        let rec inner(e_cache, transition_table) =
+            //Step 1. Pop unvisited element from task queue
+            let unvisited = List.tryFind find_functor transition_table
+            if unvisited.IsNone then (e_cache,transition_table) else
+            let unvisited&(nfas, (dfa:DFA,_)) = unwrap unvisited
+            //Step 2. Remove ourself from transition table and add back in, marked as visited
+            let transition_table = (nfas, (dfa, true))::(List.filter (not << (same_x unvisited)) transition_table)
+            let rec traverse_alphabet_at(e_cache, nfas:NFA list, at:int) =
+                match nfas with
+                    |[] -> (e_cache, [])
                     | head::tail ->
-                        let (_,df, nf) = head
-                        assert(match df with |DFA.Empty->false|_->true)
-                        //Step 1. Remove ourselves from q
-                        let q = List.filter (fun(x)->
-                            let (_,_,other)=x
-                            not (equal_sets(other, nf))) q
-                        //Step 2. Add ourselves back in with visited set to "true".
-                        let q = (true,df,nf)::q
-                        //Step 3. Get all edges from our nf that don't point to an empty list
-                        //Step 4. For each of those: If [nf] list is not in queue add to queue with Df.single. Set reference of our df to that single
-                        //If [nf] list is in queue, set reference of our DF to their DF
-                        let rec iterate_states(curr:int, q: (bool*DFA*NFA list) list) :(bool*DFA*NFA list) list =
-                            if curr = len then q else
-                            let outgoing_edges = List.collect (fun(x) -> 
-                                match x with
-                                    |Empty -> failwith "Expecting non Empty NFA here"
-                                    |Regular (_, edges) -> edges.[curr]) nf
-                            let outgoing_edges = List.filter (fun(x) -> match x with |Empty->false|_->true) outgoing_edges //Remove empties
-                            let outgoing_edges = make_set outgoing_edges //Remove duplicates
-                            if List.isEmpty outgoing_edges then iterate_states(curr+1,q)else
-                            let index = find_in_q(q, outgoing_edges)
-                            match index with
-                                |Some(index)->
-                                    let (_,dfa,_) = q.[index]
-                                    df.set(curr, dfa)
-                                    iterate_states(curr+1,q)
-                                |None ->
-                                    let new_df = DFA.single(List.exists (fun(x:NFA) -> x.is_final()) outgoing_edges, len)
-                                    df.set(curr, new_df)
-                                    iterate_states(curr+1,(false,new_df,outgoing_edges)::q)
-                        let q = iterate_states(0,q)
-                        modifiy_q (tail, q)
-            let q = modifiy_q(not_visited_states,q)
-            inner q
-        let initial_dfa_state = DFA.single(this.is_final(), len)
-        let q = inner ([(false, initial_dfa_state,[this])])
-        initial_dfa_state
+                        let symbol_transitions = match head with |Regular (_, arr)-> arr.[at+1] |_ -> failwith "Don't expect an empty here!"
+                        let rec collect_eps_transitions(e_cache,sym_list:NFA list) =
+                            match sym_list with
+                                | [] -> (e_cache, [])
+                                | head::tail ->
+                                    let (eps_trans,e_cache,_) = head.epsilon_reachable(e_cache,[])
+                                    let (e_cache, app) = collect_eps_transitions(e_cache,tail)
+                                    (e_cache, set_union eps_trans app)
+                        let (e_cache,eps_transitions) = collect_eps_transitions(e_cache,symbol_transitions)
+                        let (e_cache, rest_set) = traverse_alphabet_at(e_cache,tail,at)
+                        (e_cache, set_union (set_union eps_transitions symbol_transitions) rest_set)
+            let rec traverse_nfas(e_cache,transition_table, curr:int) =
+                if curr >= len then (e_cache,transition_table) else
+                let (e_cache,possible_transition) = traverse_alphabet_at(e_cache,nfas,curr)
+                let probe = probe_transition_table(transition_table, possible_transition)
+                if probe.IsNone then
+                    let dfa_n = DFA.single(is_final possible_transition,len)
+                    dfa.set(curr, dfa_n)
+                    let transition_table = (possible_transition, (dfa_n, false))::transition_table
+                    traverse_nfas(e_cache,transition_table,curr+1)
+                else
+                    let (dfa2,_) = unwrap probe
+                    dfa.set(curr, dfa2)
+                    traverse_nfas(e_cache,transition_table,curr+1)
+            //Step 2. For each input symbol, traverse all the possible transitions of the NFAs
+            let (e_cache, transition_table) = traverse_nfas(e_cache,transition_table,0)
+            inner (e_cache, transition_table)
 
+        inner(e_cache, transition_table) |> ignore
+        d_0
 type Expression<'T when 'T: equality> =
     |Epsilon // €
     |Empty // o/
@@ -436,18 +469,22 @@ let regex_parse_tests() : unit =
 
 let interpreter_tests() : unit =
     //Gerade noch rechtzeitig, um die Übungsaufgaben zu lösen :)
+    printfn "Testing direct interpreter"
     printfn "Is in language: %A" (interpreter ("b(a|b)*a", "bbaba"))
     printfn "Is in language: %A" (interpreter ("(b(cb|aa*)c)*","bcbcbabc"))
     printfn "Is in language: %A" (interpreter ("(a|b)*b(a|b)(b|a)","ababbbaba"))
-    //printfn "Is in language: %A" (interpreter ("((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*","aabaabaabaabaabaabaabaabaabaab"))
+    printfn "Is in language: %A" (interpreter ("((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*","aabaabaabaabaabaabaabaabaabaab"))
 
 let bytecodeinterpreter_tests() : unit =
     printfn "\n---------------------------------------------\n"
+    printfn "Testing Bytecode generator (and directly intpreting one string)"
     printfn "Is in language: %A" (bytecode_interpreter ("b(a|b)*a", "bbaba"))
     printfn "Is in language: %A" (bytecode_interpreter ("(b(cb|aa*)c)*","bcbcbabc"))
     printfn "Is in language: %A" (bytecode_interpreter ("(a|b)*b(a|b)(b|a)","ababbbaba"))
     printfn "Is in language: %A" (bytecode_interpreter ("(a|b)?abb*","ab"))
-    //printfn "Is in language: %A" (bytecode_interpreter ("((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*","aabaabaabaabaabaabaabaabaabaab"))
+    printfn "Is in language: %A" (bytecode_interpreter ("a*ba*|b*ab*","aba"))
+    printfn "Is in language: %A" (bytecode_interpreter ("((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*","aab"))
+    printfn "Is in language: %A" (bytecode_interpreter ("((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*((aa)*b(aa)*|a(aa)*ba(aa)*)((aa)*b(aa)*b(aa)*|(aa)*ba(aa)*ba(aa)*|a(aa)*b(aa)*ba(aa)*|a(aa)*ba(aa)*b(aa)*)*","aabaabaabaabaabaabaabaabaabaab"))
 [<EntryPoint>]
 let main argv =
     //Regex to String testing
