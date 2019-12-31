@@ -347,9 +347,10 @@ type Regex<'T when 'T :> IComparable<String> and 'T:equality> =
 
 
     member this.generate_acceptor() : String->bool =
+        let dfa = (fst (this.expression.convert_to_nfa(this.alphabet, true))).convert_to_dfa(this.alphabet)
         fun(x) ->
             let tokens = tokenize(x, this.alphabet)
-            (fst (this.expression.convert_to_nfa(this.alphabet, true))).convert_to_dfa(this.alphabet).interpreter_expression(tokens, this.alphabet)
+            dfa.interpreter_expression(tokens, this.alphabet)
     //Infix Parsing - Etwas komplizierter
     //Von dem Alphabet wird an dieser Stelle die Eindeutigkeit erwartet ----> Ein Alphabet ["hallo"; "ha"] wäre invalide, da "hallo" mit "ha" anfängt
     //Dafür gibt es auch ein Fachbegriff, der ist mir aber entfallen.
